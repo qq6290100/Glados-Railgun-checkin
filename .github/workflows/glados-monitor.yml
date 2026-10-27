@@ -1,0 +1,127 @@
+name: glados monitor
+
+# 注意：GitHub Actions 的 schedule cron 只按 UTC 走，timezone 字段会被忽略，
+# 所以这里直接写 UTC 时间。13:30 UTC = 21:30 北京时间。
+# 现有签到工作流是 09:18 / 12:18 UTC（即北京时间 17:18 / 20:18），
+# 本监控在当天最后一跑之后再跑一次：当天已签则返回重复、直接通过；
+# 当天漏签则本跑就是补签；补签仍失败则工作流失败并建报警 Issue。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 13 * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  monitor:
+    name: glados monitor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Monitor and补签
+        id: monitor
+        run: |
+          python3 -m pip install -q requests
+          python3 - << 'PY'
+          import os
+          import sys
+          import requests
+
+          PLATFORM_UA = {
+              "Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "macOS": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+              "Android": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+          }
+
+          cookies = [c.strip() for c in os.environ.get("GLADOS_COOKIES", "").split("&") if c.strip()]
+          if not cookies:
+              print("FAIL: GLADOS_COOKIES 为空")
+              sys.exit(1)
+
+          failed = []
+          warnings = []
+          for idx, cookie in enumerate(cookies, 1):
+              domain = "glados.cloud"
+              headers = {"origin": f"https://{domain}", "user-agent": PLATFORM_UA["Windows"], "cookie": cookie}
+              try:
+                  r = requests.post(f"https://{domain}/api/user/checkin", headers=headers, data={"token": domain}, timeout=(30, 60))
+                  raw = r.json()
+              except Exception as e:
+                  print(f"FAIL: 账号 {idx} 签到请求失败: {e}")
+                  failed.append(idx)
+                  continue
+              code = raw.get("code", -2)
+              if code == 4 and raw.get("reason") == "device-mismatch":
+                  device = raw.get("loginDevice")
+                  ua = PLATFORM_UA.get(device)
+                  if ua and ua != headers["user-agent"]:
+                      headers["user-agent"] = ua
+                      try:
+                          r = requests.post(f"https://{domain}/api/user/checkin", headers=headers, data={"token": domain}, timeout=(30, 60))
+                          raw = r.json()
+                          code = raw.get("code", -2)
+                      except Exception as e:
+                          print(f"FAIL: 账号 {idx} 重试请求失败: {e}")
+                          failed.append(idx)
+                          continue
+              try:
+                  s = requests.get(f"https://{domain}/api/user/status", headers=headers, timeout=(30, 60)).json()
+                  left = s.get("data", {}).get("leftDays")
+              except Exception:
+                  left = None
+              try:
+                  p = requests.get(f"https://{domain}/api/user/points", headers=headers, timeout=(30, 60)).json()
+                  points = p.get("points")
+              except Exception:
+                  points = None
+              print(f"账号 {idx}: 签到 code={code} message={raw.get('message', '')} 积分={points} 剩余天数={left}")
+              if code not in (0, 1):
+                  failed.append(idx)
+                  if code == -2:
+                      print(f"FAIL: 账号 {idx} 无权限(code=-2)，Cookie 可能已失效，请重登 glados.cloud 后更新仓库 Secret GLADOS_COOKIES")
+              elif left is not None and points is not None:
+                  try:
+                      if int(float(left)) <= 2 and int(float(points)) < 100:
+                          warnings.append(idx)
+                          print(f"WARNING: 账号 {idx} 剩余 {left} 天且积分 {points} 不足 100，到期前可能换不到 10 天")
+                  except Exception:
+                      pass
+          if failed:
+              print(f"FAIL: 漏签账号 {failed}")
+              sys.exit(1)
+          if warnings:
+              print(f"WARNING: 临近到期且积分不足的账号 {warnings}")
+          print("OK: 当天已签或补签成功")
+          PY
+        env:
+          GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
+
+      - name: Create alarm issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="GLaDOS漏签报警"
+          BODY="GLaDOS 当天签到在 21:30 监控补签后仍失败，或 Cookie 已失效。
+          运行记录：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          处理办法：1) 手动在 glados.cloud 签到一次；2) 若提示无权限，请重登 glados.cloud 后更新仓库 Secret GLADOS_COOKIES；3) 下次监控成功会自动关闭本 Issue。
+          注意：本 Issue 正文不含任何 Cookie。"
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "监控再次失败，运行记录：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Close alarm issue on success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="GLaDOS漏签报警"
+          for N in $(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[].number' || true); do
+            gh issue close "$N" --comment "监控已恢复：当天已签或补签成功，本 Issue 自动关闭。"
+          done
