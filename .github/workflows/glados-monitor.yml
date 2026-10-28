@@ -19,6 +19,7 @@ jobs:
     name: glados monitor
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Monitor and补签
         id: monitor
         run: |
@@ -109,7 +110,7 @@ jobs:
           运行记录：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           处理办法：1) 手动在 glados.cloud 签到一次；2) 若提示无权限，请重登 glados.cloud 后更新仓库 Secret GLADOS_COOKIES；3) 下次监控成功会自动关闭本 Issue。
           注意：本 Issue 正文不含任何 Cookie。"
-          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' || true)
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty' || true)
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "监控再次失败，运行记录：https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           else
