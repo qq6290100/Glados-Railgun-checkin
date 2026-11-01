@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from dataclasses import asdict, dataclass
@@ -192,6 +193,29 @@ PLATFORM_UA = {
 }
 
 
+def _load_device_seed() -> Dict[str, str]:
+    """读取仓库内的设备种子：按 Cookie 序号给首试 UA 定平台。
+
+    种子文件 .device_cache.json 与 checkin.py 同目录，键为 Cookie 序号
+    （与 GLADOS_COOKIES 的 & 分隔顺序一致，从 1 开始），值为平台名
+    （Windows/macOS/Linux/iPhone/Android）。文件缺失、损坏或值不在
+    PLATFORM_UA 里时返回空 dict，调用方退回默认行为。
+    """
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, ".device_cache.json"), "r", encoding="utf-8") as f:
+            seed = json.load(f)
+        if not isinstance(seed, dict):
+            return {}
+        return {
+            str(k): v
+            for k, v in seed.items()
+            if not str(k).startswith("_") and v in PLATFORM_UA
+        }
+    except Exception:
+        return {}
+
+
 class API:
     """API 调用"""
 
@@ -205,6 +229,7 @@ class API:
         self.cookie_index: int = cookie_index
         self.verbose: bool = verbose
         self.headers: Dict[str, str] = self._get_headers()
+        self._seed_platform: Optional[str] = _load_device_seed().get(str(cookie_index))
         self._device_ua_cache: Dict[str, str] = {}
         self.session = requests.Session()
         self.session.headers.update(self.headers)
@@ -300,8 +325,14 @@ class API:
         url = self._get_full_url(self.CHECKIN_URL)
         checkin_data = self._get_checkin_data()
 
-        # 起始 UA 优先复用已学得的设备 UA，否则用会话默认 UA
-        start_ua = self._device_ua_cache.get("_last") or self.headers.get("user-agent")
+        # 首试 UA：优先用种子文件里该账号的设备平台（首试就对上，
+        # 不触发设备不一致检测），其次复用本次运行已学得的 UA，
+        # 最后用会话默认 UA；code 4 重试仍保留作兜底
+        seed_platform = getattr(self, "_seed_platform", None)
+        seed_ua = PLATFORM_UA.get(seed_platform) if seed_platform else None
+        start_ua = seed_ua or self._device_ua_cache.get("_last") or self.headers.get("user-agent")
+        start_platform = {v: k for k, v in PLATFORM_UA.items()}.get(start_ua, "未知")
+        self._log("info", LogEmoji.INFO, f"首试 UA 平台={start_platform}", force=True)
 
         raw = self._checkin_attempt(url, checkin_data, cookies, start_ua)
 
