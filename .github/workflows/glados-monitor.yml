@@ -46,7 +46,10 @@ jobs:
           warnings = []
           for idx, cookie in enumerate(cookies, 1):
               domain = "glados.cloud"
-              headers = {"origin": f"https://{domain}", "user-agent": PLATFORM_UA["Windows"], "cookie": cookie}
+              # 2026-11-04 实测：7 个号的登录设备全是 Linux（11-03 自动签到日志），
+              # 首试必须用 Linux；Windows 首试会先触发一次设备不匹配检测邮件，
+              # 再靠 code 4 重试补分。code 4 重试保留作兜底（登录设备变更时用）。
+              headers = {"origin": f"https://{domain}", "user-agent": PLATFORM_UA["Linux"], "cookie": cookie}
               try:
                   r = requests.post(f"https://{domain}/api/user/checkin", headers=headers, data={"token": domain}, timeout=(30, 60))
                   raw = r.json()
